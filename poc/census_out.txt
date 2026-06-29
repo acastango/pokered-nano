@@ -1,0 +1,105 @@
+census total: 561.9 KB across 17377 symbols + INCBIN remainder
+
+bucket                                          KB      %
+----------------------------------------------------------
+text                                         125.2   22.3
+gfx: pokemon/trainer pics                     92.0   16.4
+maps: data(grids/headers/objects)             84.7   15.1
+gfx: tilesets/sprites                         67.3   12.0
+audio                                         48.5    8.6
+code: misc/uncategorized                      41.7    7.4
+code: pokemon mgmt/stats                      22.7    4.0
+code: battle                                  22.1    3.9
+code: overworld/map engine                    20.9    3.7
+code: menus/UI                                16.3    2.9
+code: items/shop                               6.2    1.1
+code: scripts/cutscene/misc                    6.1    1.1
+code: pokedex                                  4.2    0.7
+code: link/trade                               2.8    0.5
+code: save/box/SRAM                            1.1    0.2
+audio engine                                   0.3    0.1
+
+=== top 30 individual symbols by size ===
+    4.10KB  BaseStats                              [Battle Engine 7]
+    2.09KB  BorderPalettes                         [bank1C]
+    2.00KB  Overworld_Block                        [Tilesets 1]
+    2.00KB  Museum_Block                           [Tilesets 2]
+    2.00KB  Forest_Block                           [Tilesets 2]
+    2.00KB  Facility_Block                         [Tilesets 2]
+    2.00KB  Cavern_Block                           [Tilesets 3]
+    1.86KB  MonsterNames                           [Pokémon Names]
+    1.81KB  Gym_Block                              [Tilesets 2]
+    1.75KB  PokemonLogoGraphics                    [Font Graphics]
+    1.72KB  Cemetery_Block                         [Tilesets 3]
+    1.51KB  MoveNames                              [Move Names]
+    1.50KB  SGBBorderGraphics                      [bank1C]
+    1.50KB  Pokecenter_GFX                         [Tilesets 2]
+    1.50KB  Gym_GFX                                [Tilesets 2]
+    1.50KB  GameFreakIntroEnd                      [bank10]
+    1.50KB  Forest_GFX                             [Tilesets 2]
+    1.50KB  Facility_GFX                           [Tilesets 2]
+    1.48KB  Museum_GFX                             [Tilesets 2]
+    1.48KB  Interior_GFX                           [Tilesets 1]
+    1.47KB  ShipPort_GFX                           [Tilesets 1]
+    1.47KB  Overworld_GFX                          [Tilesets 1]
+    1.47KB  Mansion_GFX                            [Tilesets 1]
+    1.47KB  Lobby_GFX                              [Tilesets 3]
+    1.47KB  House_GFX                              [Tilesets 1]
+    1.44KB  Lab_GFX                                [Tilesets 3]
+    1.44KB  Cemetery_GFX                           [Tilesets 3]
+    1.41KB  Ship_GFX                               [Tilesets 3]
+    1.23KB  MoveAnimationTiles2                    [bank1E]
+    1.23KB  MoveAnimationTiles1                    [bank1E]
+
+=== top 50 symbols in code: misc/uncategorized ===
+    2.09KB  BorderPalettes                         [bank1C]
+    1.50KB  SGBBorderGraphics                      [bank1C]
+    1.00KB  FontGraphics                           [Font Graphics]
+    0.77KB  TradingAnimationGraphics               [Battle Engine 7]
+    0.49KB  WildDataPointers                       [bank3]
+    0.40KB  AttackAnimationPointers                [bank1E]
+    0.35KB  FrameBlockBaseCoords                   [bank1E]
+    0.30KB  NintendoCopyrightLogoGraphics          [Font Graphics]
+    0.29KB  SuperPalettes                          [bank1C]
+    0.28KB  HiddenEventsFor_GAME_CORNER            [Hidden Events Core]
+    0.24KB  FrameBlockPointers                     [bank1E]
+    0.22KB  DrawTrainerInfo                        [Battle Engine 1]
+    0.19KB  RocketData                             [Battle Engine 7]
+    0.17KB  SubanimationPointers                   [bank1E]
+    0.17KB  HiddenEventPointers                    [Hidden Events Core]
+    0.16KB  TheEndGfx                              [Itemfinder 1]
+    0.14KB  Rival2Data                             [Battle Engine 7]
+    0.14KB  GameFreakLogoGraphics                  [Font Graphics]
+    0.13KB  Init.loop                              [Home]
+    0.12KB  BlkPacket_TrainerCard                  [bank1C]
+    0.12KB  SpecialEffectPointers                  [bank1E]
+    0.11KB  UsedCut.canCut                         [bank3]
+    0.11KB  HiddenEventsFor_VERMILION_GYM          [Hidden Events Core]
+    0.11KB  JrTrainerFData                         [Battle Engine 7]
+    0.10KB  PlaceNextChar.NotLine                  [Home]
+    0.10KB  TryPushingBoulder                      [bank3]
+    0.10KB  SuperRodData                           [bank3]
+    0.10KB  AnimationShakeEnemyHUD                 [bank1E]
+    0.10KB  CheckSGB                               [bank1C]
+    0.09KB  GiveFossilToCinnabarLab                [Cinnabar Lab Fossils]
+    0.09KB  DivideBCD.next                         [bank3]
+    0.09KB  TrainerDataPointers                    [Battle Engine 7]
+    0.09KB  HallOfFamePC                           [Itemfinder 1]
+    0.09KB  Subanim_1LightningBall                 [bank1E]
+    0.08KB  DisplayNamingScreen                    [bank1]
+    0.08KB  BirdKeeperData                         [Battle Engine 7]
+    0.08KB  Dakutens                               [bank1]
+    0.08KB  Version_GFX                            [Battle Engine 11]
+    0.08KB  Start                                  [Header]
+    0.08KB  InitPlayerData2                        [bank3]
+    0.08KB  FrameBlock22                           [bank1E]
+    0.07KB  LassData                               [Battle Engine 7]
+    0.07KB  GymTrashCans                           [Hidden Events 3]
+    0.07KB  FallingStarEnd                         [bank1C]
+    0.07KB  PlayerPCToss.loop                      [bank1]
+    0.07KB  PlaySubanimation.loop                  [bank1E]
+    0.07KB  AnimationIdSpecialEffects              [bank1E]
+    0.07KB  TrackPlayTime                          [Play Time]
+    0.07KB  BikerData                              [Battle Engine 7]
+    0.07KB  ViridianSchoolBlackboard.blackboardLoop [Hidden Events 3]
+  ...2289 symbols total in misc, 41.6KB

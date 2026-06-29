@@ -1,0 +1,21 @@
+# Third-party ground-truth disassembly (clone separately — see README)
+pokered-master/
+
+# Design-conversation transcripts (local only)
+cctranscript/
+
+# Project memory store / local tooling
+.mnemo/
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store
+*.swp

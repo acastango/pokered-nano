@@ -1,0 +1,54 @@
+=== assembled Z80 'now' (pokered.map symbol-delta) ===
+    12 B  BluesHouse_Script
+    11 B  BluesHouseDefaultScript
+     1 B  BluesHouseNoopScript
+    23 B  BluesHouseDaisySittingText
+     5 B  BluesHouseDaisyRivalAtLabText
+     5 B  BluesHouseDaisyOfferMapText
+     6 B  GotMapText
+     5 B  BluesHouseDaisyBagFullText
+     5 B  BluesHouseDaisyUseMapText
+     5 B  BluesHouseDaisyWalkingText
+     5 B  BluesHouseTownMapText
+     4 B  BluesHouse_ScriptPointers
+     6 B  BluesHouse_TextPointers
+  ----
+  NOW total: 93 B  (script code, excl. text strings)
+
+=== hand-encoded bytecode (same logic) ===
+   1 B  ENABLE_TEXTBOX                   ; call EnableAutoTextBoxDrawing (header flag)
+   1 B  DISPATCH wCurScript              ; ld hl,ScriptPointers/ld a,[cur]/jp CallFunctionInTable -> implicit
+   3 B  SETEVENT ENTERED                 ; SetEvent EVENT_ENTERED_BLUES_HOUSE
+   2 B  SETSCRIPT NOOP                   ; ld a,NOOP/ld [wCurScript],a
+   1 B  END                              ; ret
+   1 B  END                              ; ret  (noop state)
+   4 B  IFEVENT GOT_TOWN_MAP -> got      ; CheckEvent GOT_TOWN_MAP / jr nz .got_town_map
+   4 B  IFEVENT GOT_POKEDEX  -> give     ; CheckEvent GOT_POKEDEX / jr nz .give_town_map
+   3 B  PRINT RivalAtLab                 ; ld hl,...RivalAtLab / call PrintText
+   2 B  JUMP done                        ; jr .done
+   3 B  PRINT OfferMap                   ; ld hl,...OfferMap / call PrintText
+   4 B  GIVE TOWN_MAP,1 -> bagfull       ; lb bc,TOWN_MAP,1 / call GiveItem / jr nc .bag_full
+   2 B  HIDE DAISY_OBJ                   ; ld a,TOGGLE.../ld [wToggleableObjectIndex],a / predef HideObject
+   3 B  PRINT GotMap                     ; ld hl,GotMapText / call PrintText
+   3 B  SETEVENT GOT_TOWN_MAP            ; SetEvent EVENT_GOT_TOWN_MAP
+   2 B  JUMP done                        ; jr .done
+   3 B  PRINT UseMap                     ; ld hl,...UseMap / call PrintText
+   2 B  JUMP done                        ; jr .done
+   3 B  PRINT BagFull                    ; ld hl,...BagFull / call PrintText
+   1 B  END                              ; jp TextScriptEnd
+   4 B  PRINT DaisyWalking; END          ; BluesHouseDaisyWalkingText: text_far+text_end
+   4 B  PRINT TownMap; END               ; BluesHouseTownMapText: text_far+text_end
+   2 B  SFX get_key_item                 ; GotMapText had sound_get_key_item
+  ----
+  BYTECODE total: 58 B
+
+  ratio: 1.60x   (now 93 B -> bytecode 58 B, 38% smaller)
+
+=== DENOMINATOR: script-code layer, game-wide (pokered.map) ===
+  script logic/dispatch (*Script)    :   15.9 KB
+  text-command wrappers (*Text)      :   23.3 KB
+  dispatch/pointer tables            :    3.4 KB
+  ---- script-code layer TOTAL       :   42.5 KB (4342 symbols)
+
+  At the measured 1.60x: 42.5 KB -> 26.5 KB  (saves ~15.9 KB)
+  vs total ROM 561.9 KB: this layer is 7.6% of the ROM
