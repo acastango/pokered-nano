@@ -100,13 +100,77 @@ def cmd_gen(argv):
     aug = "aug" in argv or "--aug" in argv
     chunks = "chunks" in argv or "--chunks" in argv
     windows = "windows" in argv or "--windows" in argv
+    world = "world" in argv or "--world" in argv
     argv = [a for a in argv if a not in ("enum", "--enum", "aug", "--aug",
-                                         "chunks", "--chunks", "windows", "--windows")]
+                                         "chunks", "--chunks", "windows", "--windows",
+                                         "world", "--world")]
     steps = int(next((a for a in argv if a.isdigit()), 200))
     out = next((a for a in argv if not a.isdigit()),
                os.path.join(HERE, "transitions_coord.jsonl"))
     maps = small_maps()
     n = 0
+    if world:
+        # Phase B: like windows, but the STATE carries a map-id and the OUTPUT is
+        # either a move (wx,wy) or a transition "M<dest>:dx,dy" (warp/stairs/edge
+        # connection). Moves labeled by the fast rule; transitions by the oracle,
+        # oversampled (they're rare) so the net memorizes the warp graph.
+        from mapdata import _MAP_INDEX
+        MAP_IDX = {c: i for i, c in enumerate(_MAP_INDEX)}
+        CW, CH, b, OVER = 10, 9, 1, 20
+        print("maps: %d  mode=world  (map-id + warp graph)" % len(_MAP_INDEX), flush=True)
+        nt = 0
+        with open(out, "w", encoding="utf-8") as f:
+            for mc in _MAP_INDEX:
+                try:
+                    w = World(mc)
+                    midx = MAP_IDX[mc]
+                    full = plain_grid(w.m, None, w.m.npcs).split("\n")
+                    GH, GW = len(full), len(full[0])
+                    warp_at = w.m.warp_at
+                    o = World(mc)                       # reused oracle for transitions
+                    for cj in range(-(-GH // CH)):
+                        for ci in range(-(-GW // CW)):
+                            win = window_at(full, ci, cj, CW, CH, b)
+                            cs = "\n".join(win)
+                            for wy in range(b, b + CH):
+                                for wx in range(b, b + CW):
+                                    if win[wy][wx] not in ".g":
+                                        continue
+                                    ax, ay = ci * CW - b + wx, cj * CH - b + wy
+                                    state = "M%d\n%s\n@%d,%d" % (midx, cs, wx, wy)
+                                    for a in ACTIONS:
+                                        dx, dy = DELTA[a]
+                                        tx, ty = ax + dx, ay + dy
+                                        transition = ((tx, ty) in warp_at
+                                                      or not (0 <= tx < GW and 0 <= ty < GH))
+                                        if not transition:           # plain move
+                                            nx, ny = move_from_grid(wx, wy, a, win)
+                                            outp = "%d,%d" % (nx, ny)
+                                            reps = 1
+                                        else:                        # warp / connection
+                                            if o.m.const != mc:
+                                                o = World(mc)
+                                            o.cx, o.cy = ax, ay
+                                            try:
+                                                o.step(a)
+                                            except Exception:
+                                                o = World(mc); continue
+                                            if o.m.const != mc and o.m.const in MAP_IDX:
+                                                outp = "M%d:%d,%d" % (MAP_IDX[o.m.const],
+                                                                      o.cx, o.cy)
+                                                reps = OVER; nt += 1
+                                            else:
+                                                outp = "%d,%d" % (wx, wy)  # blocked edge
+                                                reps = 1
+                                        for _ in range(reps):
+                                            f.write(json.dumps({"map": mc, "action": a,
+                                                    "state": state, "next": outp}) + "\n")
+                                            n += 1
+                except Exception as e:
+                    print("skip %s: %s" % (mc, e))
+        print("wrote %d transitions (%d are warp/connection x%d) -> %s"
+              % (n, nt, OVER, out))
+        return
     if windows:
         # like chunks, but each screen carries a 1-cell BORDER ring so the model
         # learns to CROSS screen edges itself (Phase A). Label = verified rule on
@@ -310,11 +374,15 @@ def oracle_coord_set(maps, k, rng):
 
 def chunk_eval_set(maps, k, rng):
     """Held-out eval matching how play sees the world: random bordered screen
-    windows of each map, random core tile, labeled by the verified rule."""
+    windows (with map-id) of each map, random core tile, MOVE labeled by the
+    verified rule. Returns (state, action, expected) triples."""
+    from mapdata import _MAP_INDEX
+    MAP_IDX = {c: i for i, c in enumerate(_MAP_INDEX)}
     CW, CH, b = 10, 9, 1
     items = []
     for mc in maps:
         try:
+            midx = MAP_IDX.get(mc, 0)
             w = World(mc)
             full = plain_grid(w.m, None, w.m.npcs).split("\n")
             GH, GW = len(full), len(full[0])
@@ -329,17 +397,18 @@ def chunk_eval_set(maps, k, rng):
                 wx, wy = rng.choice(cells)
                 a = rng.choice(ACTIONS)
                 nx, ny = move_from_grid(wx, wy, a, win)
-                items.append(("\n".join(win), wx, wy, a, nx, ny))
+                state = "M%d\n%s\n@%d,%d" % (midx, "\n".join(win), wx, wy)
+                items.append((state, a, "%d,%d" % (nx, ny)))
         except Exception:
             pass
     return items
 
 
 def evaluate(model, items, stoi, itos, T):
-    states = [state_str(g, px, py) for (g, px, py, a, nx, ny) in items]
-    acts = [a for (g, px, py, a, nx, ny) in items]
+    states = [it[0] for it in items]
+    acts = [it[1] for it in items]
     preds = batch_next(model, states, acts, stoi, itos, T)
-    ok = sum(1 for pr, it in zip(preds, items) if pr == "%d,%d" % (it[4], it[5]))
+    ok = sum(1 for pr, it in zip(preds, items) if pr == it[2])
     return 100 * ok / max(len(items), 1)
 
 
@@ -518,6 +587,9 @@ def cmd_play(argv):
     mc = next((a for a in argv if not a.isdigit()), "PALLET_TOWN")
     CW, CH = 10, 9                                      # screen size (cells)
     model, stoi, itos, T = load_model()
+    from mapdata import _MAP_INDEX
+    IDX_LIST = list(_MAP_INDEX)                          # idx -> map const
+    MAP_IDX = {c: i for i, c in enumerate(IDX_LIST)}     # map const -> idx
     vt_on()
     facing = "down"
     if gfx:                                             # reuse the engine renderer
@@ -572,24 +644,23 @@ def cmd_play(argv):
         if not action:
             continue
         facing = action
-        dx, dy = DELTA[action]
-        tx, ty = ax + dx, ay + dy
         note = ""
-        on_warp = (tx, ty) in w.m.warp_at
-        offmap = not (0 <= tx < GW and 0 <= ty < GH)
-        if on_warp or offmap:                          # engine: warp / map connection
-            pre = w.m.const
-            w.step(action)
-            if w.m.const != pre:
-                mc = w.m.const
+        b = 1                                          # bordered window + map-id
+        win = window_at(full, ci, cj, CW, CH, b)
+        wx, wy = ax - ci * CW + b, ay - cj * CH + b
+        state = "M%d\n%s\n@%d,%d" % (MAP_IDX[mc], "\n".join(win), wx, wy)
+        pred = batch_next(model, [state], [action], stoi, itos, T)[0]
+        if pred.startswith("M") and ":" in pred:       # model predicts a transition
+            try:
+                didx, dc = pred[1:].split(":")
+                dx, dy = dc.split(",")
+                mc = IDX_LIST[int(didx)]
+                w = World(mc); w.cx, w.cy = int(dx), int(dy)
                 full = plain_grid(w.m, None, w.m.npcs).split("\n")
                 note = "→ %s" % mc
-        else:                                          # model moves within the map
-            b = 1                                      # (incl. screen-crossing, Phase A)
-            win = window_at(full, ci, cj, CW, CH, b)
-            wx, wy = ax - ci * CW + b, ay - cj * CH + b
-            pred = batch_next(model, [state_str("\n".join(win), wx, wy)],
-                              [action], stoi, itos, T)[0]
+            except Exception:
+                note = "(bad warp: %s)" % pred
+        else:                                          # plain move within the map
             c = parse_coord(pred)
             legal = move_from_grid(wx, wy, action, win)
             nl = c if (raw and c is not None) else legal
