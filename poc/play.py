@@ -18,14 +18,25 @@ import sys
 import time
 import ctypes
 import shutil
+import random
 
 sys.path.insert(0, os.path.dirname(__file__))
 from mapdata import MapData, load_sprite
 from play_pallet import (to_braille, to_braille_color, to_block, to_ascii,
                          VW_PX, VH_PX)
 from walk_pallet import DELTA, DOWN, UP, LEFT, RIGHT
-from text_engine import (load_glyphs, resolve_text, draw_textbox,
+from text_engine import (load_glyphs, resolve_text, resolve_far, draw_textbox,
                          str_to_codes, LINE_GAP)
+import scriptvm as svm
+import battle_intro as bx
+import battle_screen as bs
+import pokemon as pk
+from wild import WILD, SLOT_WEIGHTS
+from ascii_map import grid_str
+
+GRID_DUMP = os.path.join(os.path.dirname(__file__), "map_grid.txt")
+
+GRASS_TILE = 0x52              # Overworld tileset grass tile (wGrassTile)
 
 FPS = 30
 SPEED = 4                      # px/frame; 16/4 = 4 frames/tile (~Gen I pace)
@@ -36,11 +47,139 @@ CENTER = 64                    # player's top-left sits at screen px (64,64)
 CELL = {"color": (2, 4), "braille": (2, 4), "ascii": (2, 4), "block": (1, 2)}
 START_MAP = "PALLET_TOWN"
 OPPOSITE = {UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT}
+NPC_SPEED = 2                  # px/frame for NPC steps (gentler than player)
+NPC_RANGE = 2                  # max cells an NPC wanders from its spawn
+
+
+def make_battle(kind, enemy, mine, base):
+    """Battle-intro state, with the sprites the slide-in needs pre-rendered:
+    enemy front + Red's trainer back as solid silhouettes, plus Red's normal
+    back for the post-slide screen (the mon isn't sent out until the pokeball)."""
+    es = bs.mon_front(enemy.species, solid=True)
+    return {"kind": kind, "phase": "flash", "f": 0, "enemy": enemy,
+            "player_mon": mine, "base": base,
+            "enemy_sil": es, "enemy_spot": bs.enemy_spot(es),
+            "red_sil": bs.back_56(bs.RED_BACK, solid=True),
+            "red_norm": bs.back_56(bs.RED_BACK),
+            "mon_back": bs.mon_back_56(mine.species),
+            "menu": 0, "menumsg": None, "fleeing": False, "nav": {},
+            "sub": None, "movecur": 0}
+
+
+def roll_encounter(map_base, rng):
+    """Gen I wild check: on a grass step, ~rate/256 chance; pick a slot by the
+    cumulative weights and build the wild Pokemon. Returns a Pokemon or None."""
+    data = WILD.get(map_base)
+    grass = data["grass"] if data else None
+    if not grass or grass["rate"] == 0 or not grass["slots"]:
+        return None
+    if rng.randint(0, 255) >= grass["rate"]:
+        return None
+    r, cum, slot = rng.randint(0, 255), 0, grass["slots"][-1]
+    for i, w in enumerate(SLOT_WEIGHTS):
+        cum += w
+        if r < cum:
+            slot = grass["slots"][min(i, len(grass["slots"]) - 1)]
+            break
+    level, sp_const = slot
+    sp = pk.BY_DEX.get(sp_const)
+    return pk.Pokemon(sp["key"], level) if sp else None
+
+
+def pick_dir(rng):
+    """Choose a wander direction from an NPC's movement-range byte."""
+    if rng == "UP_DOWN":
+        return random.choice((UP, DOWN))
+    if rng == "LEFT_RIGHT":
+        return random.choice((LEFT, RIGHT))
+    if rng in (DOWN, UP, LEFT, RIGHT):     # a fixed paced direction
+        return rng
+    return random.choice((UP, DOWN, LEFT, RIGHT))   # ANY_DIR / NONE
+
+
+def npc_busy(n):
+    sm = n.get("script_move")
+    return (sm is not None and sm["remaining"] > 0) or n["phase"] == "walk"
+
+
+def update_scripted_npcs(m):
+    """Drive NPCs under a script-commanded walk (MOVENPC) — ignores collision
+    and the random wander, used during cutscenes."""
+    for n in m.npcs:
+        sm = n.get("script_move")
+        if sm is None:
+            continue
+        if n["phase"] == "walk":
+            n["px"] += n["vx"]
+            n["py"] += n["vy"]
+            if (n["px"]-m.pad_px) % 16 == 0 and (n["py"]-m.pad_px) % 16 == 0:
+                n["phase"] = "idle"
+            continue
+        if sm["remaining"] <= 0:
+            n["script_move"] = None
+            continue
+        dx, dy = DELTA[sm["dir"]]
+        n["facing"] = sm["dir"]
+        n["cx"] += dx
+        n["cy"] += dy
+        n["vx"], n["vy"] = dx*NPC_SPEED, dy*NPC_SPEED
+        n["phase"] = "walk"
+        n["walkphase"] ^= 1
+        sm["remaining"] -= 1
+
+
+def apply_hidden(m):
+    """Hide NPCs the original reveals via a script (per the MAP_HIDDEN registry),
+    until a SHOW opcode reveals them."""
+    spawns = svm.MAP_HIDDEN.get(m.const, ())
+    for n in m.npcs:
+        if n["spawn"] in spawns:
+            n["hidden"] = True
+
+
+def update_npcs(m, player_cell):
+    """Advance NPC wandering one frame. STAY = fixed (NONE = look around);
+    WALK = random step within NPC_RANGE of spawn, respecting collision."""
+    for n in m.npcs:
+        if n.get("hidden") or n.get("script_move"):
+            continue
+        if n["move"] != "WALK":                       # STAY
+            if n["range"] == "NONE":                  # idly glance around
+                n["timer"] -= 1
+                if n["timer"] <= 0:
+                    n["facing"] = random.choice((UP, DOWN, LEFT, RIGHT))
+                    n["timer"] = random.randint(45, 120)
+            continue
+        if n["phase"] == "walk":                      # mid-step: glide
+            n["px"] += n["vx"]
+            n["py"] += n["vy"]
+            if (n["px"]-m.pad_px) % 16 == 0 and (n["py"]-m.pad_px) % 16 == 0:
+                n["phase"] = "idle"
+                n["timer"] = random.randint(20, 120)
+            continue
+        n["timer"] -= 1                               # idle: count down, then try
+        if n["timer"] > 0:
+            continue
+        d = pick_dir(n["range"])
+        n["facing"] = d
+        dx, dy = DELTA[d]
+        tx, ty = n["cx"] + dx, n["cy"] + dy
+        sx, sy = n["spawn"]
+        if (abs(tx-sx) <= NPC_RANGE and abs(ty-sy) <= NPC_RANGE
+                and 0 <= tx < m.GW and 0 <= ty < m.GH
+                and m.walkable(tx, ty) and (tx, ty) != player_cell):
+            n["cx"], n["cy"] = tx, ty
+            n["vx"], n["vy"] = dx*NPC_SPEED, dy*NPC_SPEED
+            n["phase"] = "walk"
+            n["walkphase"] ^= 1
+        else:
+            n["timer"] = random.randint(15, 45)       # blocked: try again soon
 
 VK = {"up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
       "W": 0x57, "A": 0x41, "S": 0x53, "D": 0x44,
-      "Q": 0x51, "M": 0x4D, "I": 0x49,
-      "Z": 0x5A, "ENTER": 0x0D, "SPACE": 0x20}    # talk / confirm ("A button")
+      "Q": 0x51, "M": 0x4D, "I": 0x49, "R": 0x52, "B": 0x42, "X": 0x58,
+      "G": 0x47,                                  # dump ASCII map grid
+      "Z": 0x5A, "ENTER": 0x0D, "SPACE": 0x20}    # Z=A button, X=B button (back)
 
 
 def talk_held():
@@ -207,7 +346,7 @@ def compose(world_fb, cam_x, cam_y, sprites, invert):
 
 def main():
     argv = sys.argv[1:]
-    MODES = ["block", "color", "braille", "ascii"]
+    MODES = ["block", "color", "braille", "ascii", "grid"]   # grid = live ASCII map
     RENDER = {"color": to_braille_color, "braille": to_braille,
               "block": to_block, "ascii": to_ascii}
     mode = next((m for m in MODES if m in argv), "block")
@@ -224,15 +363,22 @@ def main():
 
     glyphs = load_glyphs()
     m = MapData(START_MAP)
+    apply_hidden(m)
     cx, cy = pick_start(m)
     px, py = m.player_px(cx, cy)
     facing, phase, moving, invert = DOWN, 0, False, True
+    events = set()                    # event flags the scripts read/set
+    script = None                     # active map-script VM (svm bytecode)
+    locked = False                    # player input frozen during a cutscene
+    ply_walk = None                   # (dir, cells) scripted player walk
     vx = vy = 0
     warp_armed = True
     last_map = last_pos = None        # LAST_MAP return target (set only when
     player = sprite("red")            # leaving an outside map, like Gen I)
     dialog = None                     # rolling 2-line window (dialog_open) when open
     transition = None                 # {"phase":"out"/"in","f":int,"warp":..} mid-warp
+    battle = None                     # {"kind","phase","f","enemy","base"} battle intro
+    party = pk.Party()                # the player's team (empty until a starter)
     frame = 0                         # global frame counter (▼ arrow blink)
 
     def do_warp(warp):
@@ -248,25 +394,28 @@ def main():
         else:
             m = MapData(dest)
             tx, ty, _, _ = m.warps[wid - 1]      # dest id is 1-based
+        apply_hidden(m)
         px, py = m.player_px(tx, ty)
         # facing is PRESERVED across the warp (walk up into a door -> face up
         # inside; the step-out-from-door sets DOWN for overworld exits).
         moving, warp_armed = False, False
 
-    def draw():
+    def scene_fb():
         cw, ch = CELL[mode]
         cam_x = clamp(px - CENTER, 0, m.PTWpx - VW_PX)
         cam_y = clamp(py - CENTER, 0, m.PTHpx - VH_PX)
         cam_x -= cam_x % cw
         cam_y -= cam_y % ch
         sprites = []
-        for n in m.npcs:                         # NPCs (static, standing frame)
-            nx, ny = m.player_px(n["x"], n["y"])
-            sx, sy = nx - cam_x, ny - cam_y
+        for n in m.npcs:                         # NPCs (live position + walk anim)
+            if n.get("hidden"):
+                continue
+            sx, sy = n["px"] - cam_x, n["py"] - cam_y
             if -16 < sx < VW_PX and -16 < sy < VH_PX:
                 sx -= sx % cw
                 sy -= sy % ch
-                sprites.append((sprite(n["sprite"])[n["facing"]][0], sx, sy))
+                idx = n["walkphase"] if n["phase"] == "walk" else 0
+                sprites.append((sprite(n["sprite"])[n["facing"]][idx], sx, sy))
         psx, psy = px - cam_x, py - cam_y         # player on top
         psx -= psx % cw
         psy -= psy % ch
@@ -283,18 +432,142 @@ def main():
             f = transition["f"]
             level = (f if transition["phase"] == "out" else FADE_FRAMES - f)
             apply_fade(fb, round(16 * level / FADE_FRAMES))
+        return fb
+
+    def render_fb(fb, status=True):
         # Native, pixel-exact — the FULL GB screen, never cropped or scaled.
-        lines = RENDER[mode](fb).split("\n")
+        # (battle/dialog use this even in "grid" mode -> fall back to block)
+        lines = RENDER.get(mode, to_block)(fb).split("\n")
         _, trows = shutil.get_terminal_size((80, 80))
         out = ["\x1b[H"]
         for i, ln in enumerate(lines):
             out.append(f"\x1b[{i+1};1H{ln}\x1b[0m\x1b[K")
-        if trows > len(lines):                 # status only if there's a spare row
+        if status and trows > len(lines):      # status only if there's a spare row
             out.append(f"\x1b[{len(lines)+1};1H WASD=walk Z=talk M=look[{mode}] "
                        f"I=invert[{'on' if invert else 'off'}] Q=quit "
                        f"\x1b[0m\x1b[K")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
+
+    def render_grid():
+        # live ASCII map: one char per cell, '@' is you, updates as you walk
+        pcell = ((px - m.pad_px) // 16, (py - m.pad_px) // 16)
+        lines = grid_str(m, player_cell=pcell, npcs=m.npcs).split("\n")
+        out = ["\x1b[H"]
+        for i, ln in enumerate(lines):
+            out.append(f"\x1b[{i+1};1H{ln}\x1b[0m\x1b[K")
+        out.append(f"\x1b[{len(lines)+1};1H WASD=walk M=look[grid] Q=quit "
+                   f"\x1b[0m\x1b[K")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    def draw():
+        if mode == "grid":
+            render_grid()
+        else:
+            render_fb(scene_fb())
+
+    def step_script():
+        """Interpret the active map-script bytecode until it blocks or ends."""
+        nonlocal dialog, locked, facing, transition, px, py, ply_walk
+        vm = script
+        if vm.block is not None:
+            if not vm.block():
+                return
+            vm.block = None
+        code = vm.code
+        while True:
+            op = code[vm.pc]
+            vm.pc += 1
+            if op == svm.OP_END:
+                vm.done = True
+                return
+            elif op == svm.OP_IFSET:
+                flag = code[vm.pc]
+                addr = code[vm.pc+1] | (code[vm.pc+2] << 8)
+                vm.pc += 3
+                if vm.prog.flags[flag] in events:
+                    vm.pc = addr
+            elif op == svm.OP_IFYGT:
+                y = code[vm.pc]
+                addr = code[vm.pc+1] | (code[vm.pc+2] << 8)
+                vm.pc += 3
+                if (py - m.pad_px) // 16 > y:
+                    vm.pc = addr
+            elif op == svm.OP_LOCK:
+                locked = True
+            elif op == svm.OP_RELEASE:
+                locked = False
+            elif op == svm.OP_FACEP:
+                facing = svm.DIR_NAME[code[vm.pc]]
+                vm.pc += 1
+            elif op == svm.OP_TEXT:
+                lines = resolve_far(m.base, vm.prog.texts[code[vm.pc]])
+                vm.pc += 1
+                if lines:
+                    dialog = dialog_open(lines)
+                    vm.block = lambda: dialog is None
+                    return
+            elif op == svm.OP_SHOW:
+                m.npcs[code[vm.pc]]["hidden"] = False
+                vm.pc += 1
+            elif op == svm.OP_HIDE:
+                n = m.npcs[code[vm.pc]]
+                vm.pc += 1
+                n["hidden"] = True
+                n["cx"], n["cy"] = n["spawn"]
+                n["px"], n["py"] = m.player_px(*n["spawn"])
+                n["phase"], n["script_move"] = "idle", None
+            elif op == svm.OP_FACENPC:
+                m.npcs[code[vm.pc]]["facing"] = svm.DIR_NAME[code[vm.pc+1]]
+                vm.pc += 2
+            elif op == svm.OP_MOVENPC:
+                i, d, cnt = code[vm.pc], code[vm.pc+1], code[vm.pc+2]
+                vm.pc += 3
+                m.npcs[i]["script_move"] = {"dir": svm.DIR_NAME[d],
+                                            "remaining": cnt}
+                vm.block = (lambda i=i: not npc_busy(m.npcs[i]))
+                return
+            elif op == svm.OP_SETFLAG:
+                events.add(vm.prog.flags[code[vm.pc]])
+                vm.pc += 1
+            elif op == svm.OP_SFX:
+                vm.pc += 1                        # no audio yet
+            elif op == svm.OP_WAIT:
+                vm.wait = code[vm.pc]
+                vm.pc += 1
+
+                def _wait():
+                    vm.wait -= 1
+                    return vm.wait <= 0
+                vm.block = _wait
+                return
+            elif op == svm.OP_JUMP:
+                vm.pc = code[vm.pc] | (code[vm.pc+1] << 8)
+            elif op == svm.OP_SETPLY:
+                px, py = m.player_px(code[vm.pc], code[vm.pc+1])
+                vm.pc += 2
+            elif op == svm.OP_MOVEPLY:
+                ply_walk = (svm.DIR_NAME[code[vm.pc]], code[vm.pc+1])
+                vm.pc += 2
+                vm.block = lambda: ply_walk is None
+                return
+            elif op == svm.OP_STEPBOTH:
+                i, od, pd = code[vm.pc], code[vm.pc+1], code[vm.pc+2]
+                vm.pc += 3
+                m.npcs[i]["script_move"] = {"dir": svm.DIR_NAME[od],
+                                            "remaining": 1}
+                ply_walk = (svm.DIR_NAME[pd], 1)
+                vm.block = (lambda i=i: ply_walk is None
+                            and not npc_busy(m.npcs[i]))
+                return
+            elif op == svm.OP_WARP:
+                wcell = ((px - m.pad_px) // 16, (py - m.pad_px) // 16)
+                if wcell in m.warp_at:
+                    transition = {"phase": "out", "f": 0,
+                                  "warp": m.warp_at[wcell]}
+                    vm.block = lambda: transition is None
+                    return
 
     if selftest:
         draw()
@@ -310,7 +583,7 @@ def main():
     except Exception:
         pass
     sys.stdout.write("\x1b[2J\x1b[?25l\x1b[?7l")
-    prev_m = prev_q = prev_i = prev_t = False
+    prev_m = prev_q = prev_i = prev_t = prev_r = prev_b = prev_g = False
     frame_dt = 1.0 / FPS
     try:
         draw()
@@ -330,6 +603,24 @@ def main():
             if now_i and not prev_i:
                 invert = not invert
             prev_i = now_i
+            now_r = held(VK["R"])     # reset event flags (re-watch cutscenes)
+            if now_r and not prev_r:
+                events.clear()
+                apply_hidden(m)
+                script, locked = None, False
+            prev_r = now_r
+            now_g = held(VK["G"])     # dump the current map as an ASCII grid
+            if now_g and not prev_g:
+                pcell = ((px - m.pad_px) // 16, (py - m.pad_px) // 16)
+                with open(GRID_DUMP, "w", encoding="utf-8") as fh:
+                    fh.write(grid_str(m, player_cell=pcell, npcs=m.npcs))
+            prev_g = now_g
+            now_b = held(VK["B"])     # debug: force a test battle (vs SQUIRTLE)
+            if now_b and not prev_b and battle is None and transition is None:
+                mine = party.mons[0] if party.mons else pk.Pokemon("charmander", 5)
+                battle = make_battle("wild", pk.Pokemon("squirtle", 5),
+                                     mine, scene_fb())
+            prev_b = now_b
 
             now_t = talk_held()
             talk_edge = now_t and not prev_t
@@ -360,6 +651,143 @@ def main():
                     time.sleep(frame_dt - dt)
                 continue            # frozen during the transition
 
+            # battle start: flash -> geometric wipe -> hold black -> placeholder.
+            # (The battle screen itself is the next system; for now press Z to
+            # leave once the intro lands.)
+            if battle is not None:
+                battle["f"] += 1
+                ph = battle["phase"]
+                if ph == "flash" and battle["f"] >= bx.FLASH_FRAMES:
+                    battle["phase"], battle["f"] = "wipe", 0
+                elif ph == "wipe" and battle["f"] >= bx.WIPE_FRAMES:
+                    battle["phase"], battle["f"] = "hold", 0
+                elif ph == "hold" and battle["f"] >= bx.HOLD_FRAMES:
+                    battle["phase"], battle["f"] = "slide", 0
+                elif ph == "slide" and battle["f"] >= bx.SLIDE_FRAMES:
+                    battle["phase"], battle["f"] = "msg", 0
+                elif ph == "throw" and battle["f"] >= bx.THROW_FRAMES:
+                    battle["phase"], battle["f"] = "scale", 0
+                elif ph == "scale" and battle["f"] >= bx.SCALE_FRAMES:
+                    battle["phase"], battle["f"] = "ready", 0
+                ph = battle["phase"]
+                if ph in ("flash", "wipe"):
+                    fb = bx.transition_frame(battle["base"], battle["kind"],
+                                             ph, battle["f"])
+                elif ph == "slide":
+                    # the black hold has ended: the field is now white and the
+                    # two pics slide on as solid black SILHOUETTES (enemy from
+                    # the left, Red's trainer back from the right), then resolve.
+                    t = battle["f"] / bx.SLIDE_FRAMES
+                    fb = bs.blank_fb()
+                    es, rb = battle["enemy_sil"], battle["red_sil"]
+                    ex, ey = battle["enemy_spot"]
+                    exc = round(-len(es[0]) + t * (ex + len(es[0])))
+                    rxc = round(VW_PX + t * (8 - VW_PX))
+                    bs.blit(fb, es, exc, ey)
+                    bs.blit(fb, rb, rxc, 40)
+                elif ph == "msg":                  # resolved: enemy + Red back
+                    e = battle["enemy"]
+                    fb = bs.blank_fb()
+                    bs.draw_battle_screen(
+                        fb, glyphs, battle["player_mon"], e,
+                        message="Wild %s\nappeared!" % e.nickname,
+                        arrow=(frame // 16) % 2 == 0,
+                        player_back=battle["red_norm"], show_player_hud=False)
+                elif ph == "throw":                # Red's back slides off left
+                    e, mine = battle["enemy"], battle["player_mon"]
+                    t = battle["f"] / bx.THROW_FRAMES
+                    fb = bs.blank_fb()
+                    bs.draw_battle_screen(fb, glyphs, mine, e,
+                                          message="Go! %s!" % mine.nickname,
+                                          player_back=[], show_player_hud=False)
+                    bs.blit(fb, battle["red_norm"], round(8 - t * (8 + 56)), 40)
+                elif ph == "scale":                # mon emerges: small -> full
+                    e, mine = battle["enemy"], battle["player_mon"]
+                    fb = bs.blank_fb()
+                    bs.draw_battle_screen(fb, glyphs, mine, e,
+                                          message="Go! %s!" % mine.nickname,
+                                          player_back=[], show_player_hud=False)
+                    n = round(bx.SCALE_START + (56 - bx.SCALE_START)
+                              * battle["f"] / bx.SCALE_FRAMES)
+                    n = max(8, min(56, n))
+                    sm = bs.scale_to(battle["mon_back"], n)
+                    bs.blit(fb, sm, 36 - n // 2, 96 - n)   # grow from bottom-center
+                elif ph == "ready":                # full screen + FIGHT menu
+                    e, mine = battle["enemy"], battle["player_mon"]
+                    fb = bs.blank_fb()
+                    bs.draw_battle_screen(fb, glyphs, mine, e)
+                    if battle["menumsg"] is not None:
+                        top, _, bot = battle["menumsg"].partition("\n")
+                        draw_textbox(fb, glyphs, top, bot,
+                                     arrow=(frame // 16) % 2 == 0)
+                    elif battle["sub"] == "moves":
+                        bs.draw_move_menu(fb, glyphs, mine, battle["movecur"])
+                    else:                          # keep the message box, add menu
+                        draw_textbox(fb, glyphs, "", "")
+                        bs.draw_battle_menu(fb, glyphs, battle["menu"])
+                else:                              # hold: black screen
+                    fb = [[1] * VW_PX for _ in range(VH_PX)]
+                render_fb(fb, status=False)
+                if ph == "msg" and talk_edge:      # Z -> send out our mon
+                    battle["phase"], battle["f"] = "throw", 0
+                elif ph == "ready":
+                    nav = battle["nav"]
+
+                    def medge(name, *vks):
+                        now = any(held(VK[k]) for k in vks)
+                        edge = now and not nav.get(name, False)
+                        nav[name] = now
+                        return edge
+                    up = medge("u", "up", "W")
+                    dn = medge("d", "down", "S")
+                    lf = medge("l", "left", "A")
+                    rt = medge("r", "right", "D")
+                    back = medge("x", "X")
+                    mine = battle["player_mon"]
+                    if battle["menumsg"] is not None:
+                        if talk_edge:              # dismiss the message
+                            if battle["fleeing"]:
+                                battle = None
+                            else:
+                                battle["menumsg"] = None
+                    elif battle["sub"] == "moves":  # FIGHT move submenu
+                        n = len(mine.moves)
+                        if up:
+                            battle["movecur"] = (battle["movecur"] - 1) % n
+                        if dn:
+                            battle["movecur"] = (battle["movecur"] + 1) % n
+                        if back:
+                            battle["sub"] = None
+                        elif talk_edge:            # pick a move (no engine yet)
+                            mvname = mine.moves[battle["movecur"]].replace("_", " ")
+                            battle["menumsg"] = "%s used\n%s!" % (mine.nickname, mvname)
+                            battle["sub"] = None
+                    else:                          # navigate the 2x2 menu
+                        cur = battle["menu"]
+                        if up and cur in (1, 3):
+                            cur -= 1
+                        if dn and cur in (0, 2):
+                            cur += 1
+                        if lf and cur in (2, 3):
+                            cur -= 2
+                        if rt and cur in (0, 1):
+                            cur += 2
+                        battle["menu"] = cur
+                        if talk_edge:              # select
+                            if cur == 0:           # FIGHT -> move submenu
+                                battle["sub"], battle["movecur"] = "moves", 0
+                            elif cur == 1:         # ITEM
+                                battle["menumsg"] = "You have no\nITEMs!"
+                            elif cur == 2:         # PKMN
+                                battle["menumsg"] = "No other\n#MON!"
+                            else:                  # RUN
+                                battle["menumsg"] = "Got away\nsafely!"
+                                battle["fleeing"] = True
+                dt = time.perf_counter() - t0
+                if dt < frame_dt:
+                    time.sleep(frame_dt - dt)
+                continue
+
             # tick an open dialog every frame (typewriter, scroll slide, waits)
             if dialog is not None:
                 if not dialog_tick(dialog, talk_edge, talk_held()):
@@ -373,15 +801,86 @@ def main():
                     time.sleep(frame_dt - dt)
                 continue            # no movement/warp while a box is open
 
+            # advance an ACTIVE map-script cutscene (the trigger that creates it
+            # runs after a step settles, in the not-moving block below).
+            if script is not None:
+                # drive scripted player movement (cutscene); paced to NPC_SPEED
+                # so the player and Oak step in sync (STEPBOTH)
+                if moving:
+                    px += vx
+                    py += vy
+                    if (px-m.pad_px) % 16 == 0 and (py-m.pad_px) % 16 == 0:
+                        moving = False
+                if not moving and ply_walk is not None:
+                    if ply_walk[1] > 0:
+                        dd = ply_walk[0]
+                        dx, dy = DELTA[dd]
+                        facing = dd
+                        moving = True
+                        vx, vy = dx*NPC_SPEED, dy*NPC_SPEED
+                        phase ^= 1
+                        ply_walk = (dd, ply_walk[1]-1)
+                    else:
+                        ply_walk = None
+                update_scripted_npcs(m)
+                step_script()
+                if script.done:
+                    script = None
+                if script is not None or locked:
+                    draw()
+                    dt = time.perf_counter() - t0
+                    if dt < frame_dt:
+                        time.sleep(frame_dt - dt)
+                    continue            # cutscene in progress -> freeze free roam
+
+            # NPC wandering: refresh occupancy, advance, refresh again so the
+            # player's collision sees NPCs' new cells
+            pcell = ((px - m.pad_px) // 16, (py - m.pad_px) // 16)
+            m.npc_at = {(n["cx"], n["cy"]): n for n in m.npcs
+                        if not n.get("hidden")}
+            update_npcs(m, pcell)
+            m.npc_at = {(n["cx"], n["cy"]): n for n in m.npcs
+                        if not n.get("hidden")}
+
             if moving:
                 px += vx
                 py += vy
                 if (px - m.pad_px) % 16 == 0 and (py - m.pad_px) % 16 == 0:
                     moving = False
+                    # wild encounter: a step landed on a grass tile
+                    gx, gy = (px - m.pad_px) // 16, (py - m.pad_px) // 16
+                    if (battle is None and transition is None
+                            and m.collision_tile(gx, gy) == GRASS_TILE):
+                        enemy = roll_encounter(m.base, random)
+                        if enemy is not None:
+                            # stand-in player mon until the starter/party system
+                            # is wired in (Oak's Lab script).
+                            mine = (party.mons[0] if party.mons
+                                    else pk.Pokemon("charmander", 5))
+                            battle = make_battle("wild", enemy, mine, scene_fb())
 
             if not moving:
                 cx = (px - m.pad_px) // 16
                 cy = (py - m.pad_px) // 16
+                # map-script trigger: settled on a new cell -> run this map's
+                # registered script (bytecode VM), if any. It checks conditions
+                # and, if it fires, LOCKs before movement input runs below.
+                prog = svm.MAP_SCRIPTS.get(m.const)
+                if prog is not None and script is None and not locked:
+                    script = svm.ScriptVM(prog)
+                    step_script()
+                    if script.done:
+                        script = None
+                # seamless map-connection crossing (no fade): stepped off the
+                # edge into a connected map -> switch and remap coords
+                if not (0 <= cx < m.GW and 0 <= cy < m.GH):
+                    nb = m._neighbor_cell(cx, cy)
+                    if nb is not None:
+                        m = MapData(nb[0])
+                        apply_hidden(m)
+                        cx, cy = nb[1], nb[2]
+                        px, py = m.player_px(cx, cy)
+                        warp_armed = True
                 if (cx, cy) not in m.warp_at:
                     warp_armed = True
                 elif warp_armed:                 # start the fade; warp at out-end
@@ -398,12 +897,16 @@ def main():
                         lines = resolve_text(m.base, const)
                         if lines:
                             dialog = dialog_open(lines)
-                            if npc is not None:     # NPC turns to face the player
+                            if npc is not None:     # NPC stops & faces the player
+                                npc["phase"] = "idle"
+                                npc["px"], npc["py"] = m.player_px(npc["cx"],
+                                                                   npc["cy"])
+                                npc["timer"] = random.randint(30, 120)
                                 npc["_save_face"] = npc["facing"]
                                 npc["facing"] = OPPOSITE[facing]
                                 dialog["npc"] = npc
 
-            if dialog is None and transition is None and not moving:
+            if dialog is None and transition is None and not moving and not locked:
                 d = None
                 if held(VK["up"]) or held(VK["W"]):
                     d = UP

@@ -145,6 +145,72 @@ run on any platform with Python 3.8+.
 
 ---
 
+## Teaching a model to *be* the engine (a learned world model)
+
+A different question from the rest of the project: instead of *shrinking* the
+engine, can a small neural net **learn to be** it — predict the game's next frame
+from the current one and a button press, having only ever *played*?
+
+The trick is the representation. Render each map as an **ASCII grid, one character
+per 8×8 tile** (`#` wall, `.` floor, `@` player, `D` door, digits = NPCs). That
+turns one step of the game into a tiny language task: read the grid + an action
+(`^ v < >`), emit the next grid. The faithful engine above becomes a perfect
+**oracle** — it generates unlimited ground-truth `(state, action) → next` traces
+and grades the model's predictions exactly.
+
+The whole stack is from scratch — stdlib, plus one optional GPU dependency:
+
+```
+pokeworld.py    headless cell-level oracle (step + ASCII render), no render deps
+gen_data.py     rolls the oracle over 103 small maps → (state, action, next) corpus
+nn.py           a hand-written reverse-mode autograd engine over NumPy (gradient-checked)
+train.py        char transformer built on nn.py — the from-scratch CPU proof
+train_torch.py  the same model in PyTorch/CUDA — the fast path (trained on an RTX 3070)
+eval.py         grades generated next-states against the oracle
+rollout.py      closed-loop: feed the model its own output and let it run the game
+dagger.py       scheduled sampling — train on the states the model itself visits
+```
+
+### What it showed
+
+- **It learns the rule, not the map.** Trained on **103 diverse interiors**, a
+  ~4.8 M-param transformer predicts the exact next grid **~99%** of the time on
+  *held-out* transitions — collision, walls, NPC blocking, the player move, all
+  inferred from examples.
+- **Diversity *is* the teacher.** On only 2 maps it scored 82% — it had
+  *memorized* two layouts. At 103 maps there was no room to memorize, so it was
+  forced to generalize: held-out accuracy went **82% → ~99%**. More maps made it
+  *more* accurate, not less.
+- **The bottleneck was optimization, not capacity.** The from-scratch trainer
+  plateaued until an overfit probe showed the loss was actually *diverging*;
+  gradient clipping + a lower LR fixed it (a 16-example overfit then hit 16/16).
+- **Per-step accuracy ≠ playability.** Run closed-loop — the model feeding on its
+  own predictions — it stays a *coherent* simulator (every frame a valid state:
+  intact walls, NPCs, exactly one player) but drifts off the true trajectory
+  after ~7 steps, because it never trained on its own slightly-wrong states.
+  **DAgger** (label the states it actually visits with the oracle's correct next,
+  then retrain) lifts the faithful horizon ~6× in a single pass — the model
+  visibly *recovers* back onto the real trajectory mid-rollout:
+
+```text
+closed-loop rollout, Oak's Lab (100 steps) — the engine tracks the model to score drift
+timeline  (. = matches engine,  X = drift):
+..XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX..........................................XXXXXXXX
+                                                   └─ longest faithful run: 42 steps ─┘
+```
+
+The model is **not** part of the shipped artifact — it's a study of whether the
+game's dynamics are *learnable* from the grid alone. They are. Pushing closed-loop
+fidelity to hundreds of steps (more DAgger, a KV-cached rollout) and widening the
+corpus to dialogue and battles is ongoing.
+
+> **GPU path:** training needs a standard CPython + `torch` (CUDA). The MSYS
+> Python that runs the interactive engine can't load torch — use a separate env
+> (Miniconda / python.org). The oracle, corpus generator and CPU trainer are pure
+> stdlib + NumPy and run anywhere.
+
+---
+
 ## The thesis (and what the measurements actually showed)
 
 Categories of a game's data split by **compressibility**, which turns out to run
@@ -223,6 +289,14 @@ poc/               Proof-of-concept engine + research scripts (Python, stdlib on
   *_coder.py         custom 2D coders for grids / art / blocksets
   census.py          logic census — sizing code by subsystem from pokered.map
   vm_poc.py          script-bytecode VM proof-of-concept
+  scriptvm.py        overworld script/event VM (Oak follow, per-map script tables)
+  pokemon.py moves.py trainers.py wild.py   Gen I data tables (species, moves +
+                     type chart, trainer rosters, wild encounters)
+  battle_intro.py battle_screen.py battle_hud.py   battle-start animation +
+                     asm-faithful battle screen (1bpp sprites, HUD, menus)
+  ascii_map.py       1-char-per-tile ASCII grid (debug view + world-model encoding)
+  pokeworld.py gen_data.py nn.py train.py train_torch.py eval.py rollout.py dagger.py
+                     learned world model — see "Teaching a model to be the engine"
   *.png              demo renders & contact sheets
 ```
 
@@ -245,15 +319,22 @@ for the whole project: **never guess Gen I behavior — read the source.**
 ## Status & roadmap
 
 **Done:** visual workstream (renderer + inked art direction), overworld engine
-(movement, collision, warps, multi-map loading), NPCs, the text system.
+(movement, collision, warps, multi-map loading), NPCs, the text system, a script
+VM, the full Pokémon / move / type / trainer / wild-encounter **data tables**,
+asm-faithful **battle-start transitions + battle screen** (1bpp front/back
+sprites, HP/status HUD, FIGHT·PKMN·ITEM·RUN and move menus), an **ASCII debug
+grid** (1 char/tile, live), and a **learned world model** (see above).
 
 **Open (in rough priority):**
 1. **Code → DSL/bytecode** — the deciding lever; defines the C-core primitive set
    and how battle/overworld/menu mechanics lower into the DSL.
 2. **Text codec** — ~124 KB → ~32 KB via a tuned PPM/word-dictionary coder
    (biggest lossless win, zero fidelity cost).
-3. Save-struct shrink (remove invisible DV/EV systems), menus, battle system,
-   NPC wandering, warp/door transition polish.
+3. Battle **engine** (turn order, damage, effects, faint/exp/PP) behind the
+   finished battle screen; save-struct shrink (remove invisible DV/EV systems),
+   menus, NPC wandering.
+4. **World model** — scheduled-sampling iterations + KV-cached rollout for long
+   closed-loop play; corpus extended to dialogue and battles.
 
 ---
 

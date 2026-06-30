@@ -72,6 +72,7 @@ _CHARMAP = _build_charmap()
 
 
 def expand_tokens(s, player="RED", rival="BLUE"):
+    s = s.replace("@", "")                # string terminator, not a glyph
     s = s.replace("#", "POKé")            # $54 ligature -> POKé
     s = s.replace("<PLAYER>", player).replace("<RIVAL>", rival)
     s = s.replace("<PK>", "PK").replace("<MN>", "MN")
@@ -105,10 +106,21 @@ def resolve_text(map_base, text_const):
     label = ptrs.get(text_const)
     if not label:
         return None
-    m = re.search(label + r":\s*\n\s*text_far\s+(\w+)", scr)
-    if not m:
-        return None                        # text_asm or non-trivial
-    return _parse_text_lines(map_base, m.group(1))
+    # the label's body up to the next top-level label; take its first text_far
+    # (handles plain `text_far _Xxx` AND text_asm wrappers that text_far inside)
+    body = re.search(r"^" + label + r":\s*\n(.*?)(?=^\w+:)", scr, re.S | re.M)
+    chunk = body.group(1) if body else scr[scr.find(label + ":"):][:1500]
+    far = re.search(r"text_far\s+(\w+)", chunk)
+    if not far:
+        return None                        # fully procedural text -> no static text
+    return _parse_text_lines(map_base, far.group(1))
+
+
+def resolve_far(map_base, far_label):
+    """Resolve a text/<Map>.asm far-text label directly to screens (used by the
+    script VM, since some NPC texts are procedural text_asm whose body just
+    text_fars these)."""
+    return _parse_text_lines(map_base, far_label)
 
 
 _KIND = {"text": "start", "line": "line", "cont": "scroll",

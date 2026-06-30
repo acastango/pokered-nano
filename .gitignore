@@ -19,3 +19,16 @@ venv/
 Thumbs.db
 .DS_Store
 *.swp
+
+# World-model artifacts (regenerable: gen_data.py / train_torch.py / dagger.py)
+poc/model_torch.pt
+poc/model.npz
+poc/model.json
+poc/transitions*.jsonl
+poc/_overfit.jsonl
+poc/map_grid.txt
+
+# scratch captures & archives
+poc/shot_*.png
+poc.zip
+poc/poc.zip

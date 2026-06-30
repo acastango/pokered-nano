@@ -20,6 +20,7 @@ Stdlib only.
 
 import os
 import re
+import random
 
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
@@ -123,6 +124,16 @@ _DOOR_TILES = _parse_door_tiles()
 _DIRS = {"UP": UP, "DOWN": DOWN, "LEFT": LEFT, "RIGHT": RIGHT}
 
 
+def _parse_connections(base):
+    """dir -> (neighbor MAP_CONST, offset in blocks). dir in n/s/e/w."""
+    txt = _read("data", "maps", "headers", base + ".asm")
+    out = {}
+    for d, _name, const, off in re.findall(
+            r"connection\s+(\w+),\s*(\w+),\s*(\w+),\s*(-?\d+)", txt):
+        out[d[0]] = (const, int(off))     # key by first letter: n/s/e/w
+    return out
+
+
 def _parse_objects(base):
     txt = _read("data", "maps", "objects", base + ".asm")
     mb = re.search(r"db \$([0-9a-fA-F]+)\s*;\s*border block", txt)
@@ -139,7 +150,8 @@ def _parse_objects(base):
             txt):
         npcs.append({"x": int(x), "y": int(y),
                      "sprite": spr[len("SPRITE_"):].lower(),
-                     "facing": _DIRS.get(dr, DOWN), "text": tid})
+                     "facing": _DIRS.get(dr, DOWN), "text": tid,
+                     "move": mv, "range": dr})   # mv=STAY/WALK, dr=range/dir
     return border, warps, signs, npcs
 
 
@@ -181,7 +193,9 @@ PAD_TILES = 12   # border-block ring (block-aligned, multiple of 4) around a map
 
 
 class MapData:
-    def __init__(self, map_const):
+    def __init__(self, map_const, light=False):
+        # light=True: a neighbor loaded only for its grid/collision (no own
+        # world_fb, no further neighbors) to render strips at a seam cheaply.
         self.const = map_const
         self.base, tileset_const = _MAP_INDEX[map_const]
         self.tileset_const = tileset_const
@@ -220,10 +234,53 @@ class MapData:
         self.npc_at = {(n["x"], n["y"]): n for n in self.npcs}
         self.sign_at = {(x, y): const for (x, y, const) in self.signs}
 
+        # map connections (seamless edges). neighbors are loaded light.
+        self.conn = _parse_connections(self.base)        # dir -> (const, off)
+        self.neighbors = {}
         self.pad_px = PAD_TILES * 8
-        self.world_fb = self._build_padded_fb()
-        self.PTWpx = (self.TW + 2*PAD_TILES) * 8
-        self.PTHpx = (self.TH + 2*PAD_TILES) * 8
+        self._init_npc_runtime()
+        if not light:
+            for d, (nconst, off) in self.conn.items():
+                self.neighbors[d] = (MapData(nconst, light=True), off)
+            self.world_fb = self._build_padded_fb()
+            self.PTWpx = (self.TW + 2*PAD_TILES) * 8
+            self.PTHpx = (self.TH + 2*PAD_TILES) * 8
+
+    def _init_npc_runtime(self):
+        """Give each NPC live wander state (current cell, pixel pos, phase)."""
+        for n in self.npcs:
+            n["cx"], n["cy"] = n["x"], n["y"]
+            n["spawn"] = (n["x"], n["y"])
+            n["px"], n["py"] = self.player_px(n["x"], n["y"])
+            n["phase"] = "idle"
+            n["timer"] = random.randint(20, 120)
+            n["vx"] = n["vy"] = 0
+            n["walkphase"] = 0
+
+    def _neighbor_tile(self, mtx, mty):
+        """Out-of-bounds TILE coord -> (neighbor, ntx, nty) or None. off*4 tiles."""
+        c = self.conn
+        if mty < 0 and "n" in self.neighbors:
+            nm, o = self.neighbors["n"]; return nm, mtx - o*4, nm.TH + mty
+        if mty >= self.TH and "s" in self.neighbors:
+            nm, o = self.neighbors["s"]; return nm, mtx - o*4, mty - self.TH
+        if mtx < 0 and "w" in self.neighbors:
+            nm, o = self.neighbors["w"]; return nm, nm.TW + mtx, mty - o*4
+        if mtx >= self.TW and "e" in self.neighbors:
+            nm, o = self.neighbors["e"]; return nm, mtx - self.TW, mty - o*4
+        return None
+
+    def _neighbor_cell(self, cx, cy):
+        """Out-of-bounds movement CELL -> (neighbor_const, ncx, ncy) or None."""
+        if cy < 0 and "n" in self.conn:
+            c, o = self.conn["n"]; return c, cx - o*2, _DIMS[c][1]*2 + cy
+        if cy >= self.GH and "s" in self.conn:
+            c, o = self.conn["s"]; return c, cx - o*2, cy - self.GH
+        if cx < 0 and "w" in self.conn:
+            c, o = self.conn["w"]; return c, _DIMS[c][0]*2 + cx, cy - o*2
+        if cx >= self.GW and "e" in self.conn:
+            c, o = self.conn["e"]; return c, cx - self.GW, cy - o*2
+        return None
 
     def _build_padded_fb(self):
         PAD = PAD_TILES
@@ -236,7 +293,14 @@ class MapData:
                 if 0 <= mtx < self.TW and 0 <= mty < self.TH:
                     tile = self.inked[self.grid[mty][mtx]]
                 else:
-                    tile = self.inked[bblock[(pty % 4)*4 + (ptx % 4)]]
+                    tile = None
+                    nb = self._neighbor_tile(mtx, mty)   # connected map strip?
+                    if nb is not None:
+                        nm, ntx, nty = nb
+                        if 0 <= ntx < nm.TW and 0 <= nty < nm.TH:
+                            tile = nm.inked[nm.grid[nty][ntx]]
+                    if tile is None:                     # else border block
+                        tile = self.inked[bblock[(pty % 4)*4 + (ptx % 4)]]
                 oy, ox = pty*8, ptx*8
                 for py in range(8):
                     row = fb[oy+py]
@@ -250,6 +314,13 @@ class MapData:
 
     def walkable(self, cx, cy):
         if not (0 <= cx < self.GW and 0 <= cy < self.GH):
+            # off the edge: walkable iff the connected neighbor's tile is
+            nb = self._neighbor_cell(cx, cy)
+            if nb is None:
+                return False
+            for d, (nm, _o) in self.neighbors.items():
+                if nm.const == nb[0]:
+                    return nm.walkable(nb[1], nb[2])
             return False
         if (cx, cy) in self.npc_at:
             return False
