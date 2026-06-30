@@ -1,28 +1,55 @@
 # pokered-nano
 
-**Re-deriving Pokémon Red from first principles into a micro/nano-sized, full-fidelity version.**
+**Can a small neural network *learn to be* Pokémon Red — and can you walk around inside it?**
 
-The goal is not a byte-exact port. It's the *smallest artifact that still **looks
-exactly like** Red and **plays like** Red* — keep everything a player perceives,
-discard the machinery they don't. Along the way the project is a measurement-driven
-study of where the bytes of a 1989-era game actually live, and how small "the same
-game" can honestly get.
+It can. A **~5M-parameter character transformer**, trained only on a faithful
+engine's ASCII traces, **walks the entire Kanto overworld at ~98% unaided** —
+collision, doors, stairs, map connections — and you can drive it yourself with
+WASD. No game rules were ever given to it; it induced them by watching the game
+get played.
 
-> The authoritative design doc is **[`DESIGN.md`](DESIGN.md)** — read it first for
-> the full reasoning, measurements, and decisions. This README is the overview.
+The project has two layers, and the second is the one worth your attention:
+
+1. **A faithful engine** — the *smallest artifact that still looks and plays like
+   Red* (Python stdlib only, rendered 1-bit into a terminal). It began as a study
+   in how small "the same game" can honestly get; it turned out to be the perfect
+   **teacher**.
+2. **A learned simulator** — a tiny net that learns the game's *rules* from the
+   engine's screens alone, then *runs* them. The engine is the oracle; the model
+   is the student that becomes the engine.
+
+> Original design/measurement doc: **[`DESIGN.md`](DESIGN.md)**.
 
 ---
 
-## What works today
+## Walk the learned world
 
-A **playable terminal engine** rendered as a 1-bit framebuffer — the real Game Boy
-screen (160×144), drawn pixel-by-pixel into your terminal.
+Every frame is the **neural net's own prediction**: you press a key, it predicts
+the next screen. Big maps are sliced into Game-Boy-sized screen chunks that connect
+Zelda-style, so a single model walks all 220 maps:
 
-Here is Pallet Town, captured straight from the engine's `block` display adapter
-(player + NPCs composited). This is the *full* 160×144 GB screen: half-block
-glyphs (`▀ ▄ █`) pack a vertical 1×2 pixel pair into each character cell, so 80×72
-cells render every pixel. You can make out the buildings and doors, the round
-tree-border, fences and signs (it's wide — scroll right to see the rest):
+```
+<conda-python> poc/coord_model.py play PALLET_TOWN      # WASD / arrows; Q to quit
+```
+
+The net handles movement; a cheap **verifier** (the collision rule read off the
+grid, 99.96% faithful to the engine) catches its rare slips. Add `--raw` to drive
+the *unaided* net (~98% correct). `█`=wall · `·`=floor · `@`=you · digits=NPCs.
+How it learned this is in **[Teaching a net to be the engine](#teaching-a-model-to-be-the-engine-a-learned-world-model)**.
+
+---
+
+## The foundation: a faithful engine (the model's oracle)
+
+The learned simulator is only as good as its teacher, and the teacher is a
+**playable terminal engine** rendered as a 1-bit framebuffer — the real Game Boy
+screen (160×144), drawn pixel-by-pixel into your terminal. It's faithful enough to
+be ground truth: every `(screen, button) → next screen` it produces is an exact
+training example.
+
+Here is Pallet Town, straight from the engine's `block` display adapter (the *full*
+160×144 GB screen — half-block glyphs `▀ ▄ █` pack a 1×2 pixel pair per cell; it's
+wide, scroll right to see the rest):
 
 ```text
 █ █▄▄▄▄▄▄▄▄▄▄█ █▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▀         █       ▄▄▄▀▀▀▀▀▀▄                     ▄ ▄     ▄ ▄     ██████████████▄     █  ▀       █ █▄▄▄▄▄▄▄▄▄▄█ █▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
@@ -234,7 +261,14 @@ Walk around inside it (WASD / arrows; movement is the net, transitions are the e
 
 ---
 
-## The thesis (and what the measurements actually showed)
+## Origins: the compression study (background)
+
+*Where this began, before the world model: a measurement-driven study of how small
+"the same game" can honestly get. It's what produced the faithful engine — which
+then became the oracle above. Kept here because the findings are the reason the
+project exists.*
+
+### The thesis (and what the measurements actually showed)
 
 Categories of a game's data split by **compressibility**, which turns out to run
 *opposite* to raw size:
@@ -348,16 +382,22 @@ asm-faithful **battle-start transitions + battle screen** (1bpp front/back
 sprites, HP/status HUD, FIGHT·PKMN·ITEM·RUN and move menus), an **ASCII debug
 grid** (1 char/tile, live), and a **learned world model** (see above).
 
-**Open (in rough priority):**
-1. **Code → DSL/bytecode** — the deciding lever; defines the C-core primitive set
-   and how battle/overworld/menu mechanics lower into the DSL.
-2. **Text codec** — ~124 KB → ~32 KB via a tuned PPM/word-dictionary coder
-   (biggest lossless win, zero fidelity cost).
-3. Battle **engine** (turn order, damage, effects, faint/exp/PP) behind the
-   finished battle screen; save-struct shrink (remove invisible DV/EV systems),
-   menus, NPC wandering.
-4. **World model** — scheduled-sampling iterations + KV-cached rollout for long
-   closed-loop play; corpus extended to dialogue and battles.
+**Open — the world model (active focus):**
+1. **Push accuracy to 98–99%** — more `--resume` passes on the chunked corpus, for
+   near-flawless *unaided* walking.
+2. **Teach the model warps & connections** — fold the engine-handled transitions
+   into the corpus with a map-id token, so the net predicts screen/map swaps
+   itself (movement is learned; this makes it self-sufficient across maps).
+3. **NPC dynamics (layer 2)** — shared movement physics + a per-entity wander
+   policy; the oracle gains NPC movement first.
+4. **Battles** — a full-battle-state *text* representation distilled from the
+   engine; expose the RNG for a deterministic first pass, then learn the
+   distribution.
+
+**Open — engine / compression (origins):**
+- **Code → DSL/bytecode** (the C-core primitive set); **text codec** (~124 KB →
+  ~32 KB, the biggest lossless win); the battle **engine** (turn order, damage,
+  effects, faint/exp/PP); save-struct shrink; menus.
 
 ---
 
