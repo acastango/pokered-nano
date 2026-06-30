@@ -45,6 +45,43 @@ class World:
                     return cx, cy
         return self.m.GW // 2, self.m.GH // 2
 
+    def reachable_from(self, cx, cy):
+        """Flood-fill the walkable cells connected to (cx, cy)."""
+        from collections import deque
+        GW, GH = self.m.GW, self.m.GH
+        seen, q = {(cx, cy)}, deque([(cx, cy)])
+        while q:
+            x, y = q.popleft()
+            for dx, dy in DELTA.values():
+                nx, ny = x + dx, y + dy
+                if (0 <= nx < GW and 0 <= ny < GH and (nx, ny) not in seen
+                        and self.walkable(nx, ny)):
+                    seen.add((nx, ny))
+                    q.append((nx, ny))
+        return seen
+
+    def spawn_main(self):
+        """Place the player in the LARGEST connected walkable region (never a
+        walled-off pocket), at its most central non-warp cell so a walk can
+        actually explore. Returns the reachable cell set (for coverage)."""
+        GW, GH = self.m.GW, self.m.GH
+        seen, best = set(), set()
+        for sy in range(GH):
+            for sx in range(GW):
+                if (sx, sy) in seen or not self.walkable(sx, sy):
+                    continue
+                comp = self.reachable_from(sx, sy)
+                seen |= comp
+                if len(comp) > len(best):
+                    best = comp
+        if not best:
+            return set()
+        cand = [c for c in best if c not in self.m.warp_at] or list(best)
+        cx0 = sum(c[0] for c in cand) / len(cand)
+        cy0 = sum(c[1] for c in cand) / len(cand)
+        self.cx, self.cy = min(cand, key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
+        return best
+
     def walkable(self, cx, cy):
         if (cx, cy) in self.npc_cells:
             return False

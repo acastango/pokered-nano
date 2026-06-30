@@ -21,6 +21,7 @@ Thumbs.db
 *.swp
 
 # World-model artifacts (regenerable: gen_data.py / train_torch.py / dagger.py)
+poc/model_*.pt
 poc/model_torch.pt
 poc/model.npz
 poc/model.json

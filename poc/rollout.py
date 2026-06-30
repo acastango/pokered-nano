@@ -58,6 +58,7 @@ def main():
     rng = random.Random(7)
 
     w = World(map_const)                 # oracle (ground truth)
+    w.spawn_main()                       # start in the largest walkable region
     sim = w.render_plain()               # the model's state (starts true)
     print("CLOSED-LOOP: model runs on its OWN output; engine tracks for scoring")
     print("map:", map_const, " steps:", steps)

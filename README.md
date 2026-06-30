@@ -209,6 +209,29 @@ corpus to dialogue and battles is ongoing.
 > (Miniconda / python.org). The oracle, corpus generator and CPU trainer are pure
 > stdlib + NumPy and run anywhere.
 
+### Update — a *walkable* world (the coordinate model)
+
+The grid-redraw model above drifts: it repaints the whole screen every step (80
+chances to err) and has to *count* the player's position in a field of identical
+tiles. Two changes fixed both and made the world playable (`poc/coord_model.py`):
+
+- **Predict the move, not the screen.** The model reads the static map + the
+  player's `@x,y` + an action and emits only the **new coordinate**; a renderer
+  draws the frame. The map can't corrupt, and position is explicit. A cheap
+  **verifier** — the collision rule read straight off the grid (99.96% vs the
+  engine) — catches the rare slip: a detect-and-correct loop.
+- **Train on every tile, uniformly.** Random walks over-sample the center and
+  starve the corners, so instead we **enumerate every reachable tile × action**.
+  Big maps are sliced into **GB-screen chunks that connect Zelda-style**, so a
+  single ~5M-param model walks the *whole* overworld — ~98% correct unaided
+  across all 220 maps, with the engine handling doors, stairs and map
+  connections.
+
+Walk around inside it (WASD / arrows; movement is the net, transitions are the engine):
+```
+<conda-python> poc/coord_model.py play PALLET_TOWN
+```
+
 ---
 
 ## The thesis (and what the measurements actually showed)
