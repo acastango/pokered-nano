@@ -459,11 +459,19 @@ def cmd_play(argv):
     warps (doors/stairs). Reuses the trained model on any map, no retrain."""
     import msvcrt
     raw = "--raw" in argv
+    gfx = "--gfx" in argv                               # real 1bpp tile graphics
+    braille = "--braille" in argv
     argv = [a for a in argv if not a.startswith("--")]
     mc = next((a for a in argv if not a.isdigit()), "PALLET_TOWN")
     CW, CH = 10, 9                                      # screen size (cells)
     model, stoi, itos, T = load_model()
     vt_on()
+    facing = "down"
+    if gfx:                                             # reuse the engine renderer
+        from mapdata import load_sprite
+        from play import compose, CENTER, clamp
+        from play_pallet import to_block, to_braille, VW_PX, VH_PX
+        spr = load_sprite("red")
     w = World(mc); w.spawn_main()
     full = plain_grid(w.m, None, w.m.npcs).split("\n")
     keys = {b"w": "up", b"s": "down", b"a": "left", b"d": "right"}
@@ -475,13 +483,31 @@ def cmd_play(argv):
         ci, cj = ax // CW, ay // CH
         lx, ly = ax - ci * CW, ay - cj * CH
         chunk = [row[ci * CW: ci * CW + CW] for row in full[cj * CH: cj * CH + CH]]
-        disp = [list(r) for r in chunk]
-        if 0 <= ly < len(disp) and 0 <= lx < len(disp[ly]):
-            disp[ly][lx] = "@"
-        body = "\n".join("    " + "".join(PRETTY.get(c, c) for c in r) for r in disp)
+        if gfx:                                     # real 16x16 tile art, 1bpp
+            px, py = w.m.player_px(ax, ay)
+            cam_x = clamp(px - CENTER, 0, w.m.PTWpx - VW_PX)
+            cam_y = clamp(py - CENTER, 0, w.m.PTHpx - VH_PX)
+            sprites = [(spr[facing][0], px - cam_x, py - cam_y)]
+            fb = compose(w.m.world_fb, cam_x, cam_y, sprites, invert=True)
+            body = (to_braille if braille else to_block)(fb)
+        else:                                       # camera-follow ASCII viewport
+            VW, VH = 13, 11
+            view = []
+            for vy in range(VH):
+                row = []
+                for vx in range(VW):
+                    wx, wy = ax - VW // 2 + vx, ay - VH // 2 + vy
+                    if vx == VW // 2 and vy == VH // 2:
+                        row.append("@")             # player stays centered
+                    elif 0 <= wy < GH and 0 <= wx < len(full[wy]):
+                        row.append(full[wy][wx])
+                    else:
+                        row.append(" ")             # off-map -> blank
+                view.append("".join(row))
+            body = "\n".join("    " + "".join(PRETTY.get(c, c) for c in r) for r in view)
         print("\033[2J\033[H")
-        print("  🧠 walking the overworld inside the net   %s  screen(%d,%d)  %s"
-              % (mc, ci, cj, "[raw]" if raw else "[+verifier]"))
+        print("  🧠 the neural net is driving   %s  (%d,%d)  %s"
+              % (mc, ax, ay, "[raw]" if raw else "[+verifier]"))
         print("  WASD / arrows = move,   Q = quit       %s\n" % note)
         print(body)
         sys.stdout.flush()
@@ -494,6 +520,7 @@ def cmd_play(argv):
             action = keys.get(k.lower())
         if not action:
             continue
+        facing = action
         dx, dy = DELTA[action]
         tx, ty = ax + dx, ay + dy
         note = ""
