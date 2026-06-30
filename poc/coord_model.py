@@ -58,6 +58,26 @@ def move_from_grid(x, y, a, lines):
     return x, y
 
 
+def window_at(full, ci, cj, CW, CH, b=1):
+    """A screen (CWxCH) plus a b-cell border ring into neighbors, so the model
+    can see one tile past every edge and predict crossings. Off-map -> '#'.
+    Core cells are window indices [b, b+CW) x [b, b+CH); a coord landing in the
+    ring (outside the core) means the player crossed into the next screen."""
+    GH = len(full)
+    win = []
+    for wy in range(CH + 2 * b):
+        fy = cj * CH - b + wy
+        row = []
+        for wx in range(CW + 2 * b):
+            fx = ci * CW - b + wx
+            if 0 <= fy < GH and 0 <= fx < len(full[fy]):
+                row.append(full[fy][fx])
+            else:
+                row.append("#")
+        win.append("".join(row))
+    return win
+
+
 # --------------------------------------------------------------------------- data
 def _emit_enum(f, mc, grid, reach):
     """Real enumerated transitions from the oracle (exact)."""
@@ -79,13 +99,46 @@ def cmd_gen(argv):
     enum = "enum" in argv or "--enum" in argv
     aug = "aug" in argv or "--aug" in argv
     chunks = "chunks" in argv or "--chunks" in argv
+    windows = "windows" in argv or "--windows" in argv
     argv = [a for a in argv if a not in ("enum", "--enum", "aug", "--aug",
-                                         "chunks", "--chunks")]
+                                         "chunks", "--chunks", "windows", "--windows")]
     steps = int(next((a for a in argv if a.isdigit()), 200))
     out = next((a for a in argv if not a.isdigit()),
                os.path.join(HERE, "transitions_coord.jsonl"))
     maps = small_maps()
     n = 0
+    if windows:
+        # like chunks, but each screen carries a 1-cell BORDER ring so the model
+        # learns to CROSS screen edges itself (Phase A). Label = verified rule on
+        # the bordered window; a coord landing in the ring = a crossing.
+        from mapdata import _MAP_INDEX
+        CW, CH, b = 10, 9, 1
+        print("maps: %d  mode=windows(%dx%d +%d border)"
+              % (len(_MAP_INDEX), CW, CH, b), flush=True)
+        with open(out, "w", encoding="utf-8") as f:
+            for mc in _MAP_INDEX:
+                try:
+                    w = World(mc)
+                    full = plain_grid(w.m, None, w.m.npcs).split("\n")
+                    GH, GW = len(full), len(full[0])
+                    for cj in range(-(-GH // CH)):
+                        for ci in range(-(-GW // CW)):
+                            win = window_at(full, ci, cj, CW, CH, b)
+                            cs = "\n".join(win)
+                            for wy in range(b, b + CH):
+                                for wx in range(b, b + CW):
+                                    if win[wy][wx] not in ".g":
+                                        continue
+                                    for a in ACTIONS:
+                                        nx, ny = move_from_grid(wx, wy, a, win)
+                                        f.write(json.dumps({"map": mc, "action": a,
+                                                "state": state_str(cs, wx, wy),
+                                                "next": "%d,%d" % (nx, ny)}) + "\n")
+                                        n += 1
+                except Exception as e:
+                    print("skip %s: %s" % (mc, e))
+        print("wrote %d windowed transitions -> %s" % (n, out))
+        return
     if chunks:
         # EVERY map (big included) sliced into GB-screen chunks, exactly as play
         # sees them; label each chunk-local move with the verified rule. Teaches
@@ -256,9 +309,9 @@ def oracle_coord_set(maps, k, rng):
 
 
 def chunk_eval_set(maps, k, rng):
-    """Held-out eval matching how play sees the world: random screen-chunks of
-    each map, random tile, labeled by the verified rule."""
-    CW, CH = 10, 9
+    """Held-out eval matching how play sees the world: random bordered screen
+    windows of each map, random core tile, labeled by the verified rule."""
+    CW, CH, b = 10, 9, 1
     items = []
     for mc in maps:
         try:
@@ -268,15 +321,15 @@ def chunk_eval_set(maps, k, rng):
             for _ in range(k):
                 ci = rng.randrange(-(-GW // CW))
                 cj = rng.randrange(-(-GH // CH))
-                chunk = [row[ci * CW: ci * CW + CW] for row in full[cj * CH: cj * CH + CH]]
-                cells = [(lx, ly) for ly, r in enumerate(chunk)
-                         for lx, c in enumerate(r) if c in ".g"]
+                win = window_at(full, ci, cj, CW, CH, b)
+                cells = [(wx, wy) for wy in range(b, b + CH)
+                         for wx in range(b, b + CW) if win[wy][wx] in ".g"]
                 if not cells:
                     continue
-                lx, ly = rng.choice(cells)
+                wx, wy = rng.choice(cells)
                 a = rng.choice(ACTIONS)
-                nx, ny = move_from_grid(lx, ly, a, chunk)
-                items.append(("\n".join(chunk), lx, ly, a, nx, ny))
+                nx, ny = move_from_grid(wx, wy, a, win)
+                items.append(("\n".join(win), wx, wy, a, nx, ny))
         except Exception:
             pass
     return items
@@ -481,8 +534,6 @@ def cmd_play(argv):
         GH, GW = len(full), len(full[0])
         ax, ay = w.cx, w.cy
         ci, cj = ax // CW, ay // CH
-        lx, ly = ax - ci * CW, ay - cj * CH
-        chunk = [row[ci * CW: ci * CW + CW] for row in full[cj * CH: cj * CH + CH]]
         if gfx:                                     # real 16x16 tile art, 1bpp
             px, py = w.m.player_px(ax, ay)
             cam_x = clamp(px - CENTER, 0, w.m.PTWpx - VW_PX)
@@ -525,24 +576,26 @@ def cmd_play(argv):
         tx, ty = ax + dx, ay + dy
         note = ""
         on_warp = (tx, ty) in w.m.warp_at
-        crosses = (tx // CW != ci or ty // CH != cj
-                   or not (0 <= tx < GW and 0 <= ty < GH))
-        if on_warp or crosses:
-            pre = w.m.const                            # engine: cross / warp / connect
+        offmap = not (0 <= tx < GW and 0 <= ty < GH)
+        if on_warp or offmap:                          # engine: warp / map connection
+            pre = w.m.const
             w.step(action)
             if w.m.const != pre:
                 mc = w.m.const
                 full = plain_grid(w.m, None, w.m.npcs).split("\n")
                 note = "→ %s" % mc
-        else:                                          # model drives intra-screen
-            cs = "\n".join(chunk)
-            pred = batch_next(model, [state_str(cs, lx, ly)], [action], stoi, itos, T)[0]
+        else:                                          # model moves within the map
+            b = 1                                      # (incl. screen-crossing, Phase A)
+            win = window_at(full, ci, cj, CW, CH, b)
+            wx, wy = ax - ci * CW + b, ay - cj * CH + b
+            pred = batch_next(model, [state_str("\n".join(win), wx, wy)],
+                              [action], stoi, itos, T)[0]
             c = parse_coord(pred)
-            legal = move_from_grid(lx, ly, action, chunk)
+            legal = move_from_grid(wx, wy, action, win)
             nl = c if (raw and c is not None) else legal
             if c != legal:
                 note = ("model -> %s" % pred) if raw else "(verifier corrected)"
-            w.cx, w.cy = ci * CW + nl[0], cj * CH + nl[1]
+            w.cx, w.cy = ci * CW - b + nl[0], cj * CH - b + nl[1]
     print("\033[2J\033[H  bye.")
 
 
