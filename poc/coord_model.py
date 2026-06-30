@@ -58,6 +58,23 @@ def move_from_grid(x, y, a, lines):
     return x, y
 
 
+def npc_text_pages(base, text_const):
+    """Resolve an NPC's dialogue (via text_engine) to a list of 2-row pages of
+    plain displayable text. None/[] if the NPC has no static text (scripted)."""
+    import text_engine
+    try:
+        screens = text_engine.resolve_text(base, text_const)
+    except Exception:
+        return None
+    if not screens:
+        return None
+    lines = [text_engine.expand_tokens(b) for b, _ in screens]
+    lines = [l for l in lines if l.strip()]
+    if not lines:
+        return None
+    return [lines[i:i + 2] for i in range(0, len(lines), 2)]
+
+
 def window_at(full, ci, cj, CW, CH, b=1):
     """A screen (CWxCH) plus a b-cell border ring into neighbors, so the model
     can see one tile past every edge and predict crossings. Off-map -> '#'.
@@ -602,6 +619,7 @@ def cmd_play(argv):
     keys = {b"w": "up", b"s": "down", b"a": "left", b"d": "right"}
     arrows = {b"H": "up", b"P": "down", b"K": "left", b"M": "right"}
     note = ""
+    dlg, dpg = None, 0                                  # active dialogue pages, page idx
     while True:
         GH, GW = len(full), len(full[0])
         ax, ay = w.cx, w.cy
@@ -631,12 +649,35 @@ def cmd_play(argv):
         print("\033[2J\033[H")
         print("  🧠 the neural net is driving   %s  (%d,%d)  %s"
               % (mc, ax, ay, "[raw]" if raw else "[+verifier]"))
-        print("  WASD / arrows = move,   Q = quit       %s\n" % note)
+        print("  WASD/arrows move,  Z talk,  Q quit       %s\n" % note)
         print(body)
+        if dlg is not None:
+            top, bot = (dlg[dpg] + ["", ""])[:2]
+            more = "▼ Z" if dpg < len(dlg) - 1 else "(end)"
+            print("\n   ╔" + "═" * 20 + "╗")
+            print("   ║ %-18s ║" % top)
+            print("   ║ %-18s ║  %s" % (bot, more))
+            print("   ╚" + "═" * 20 + "╝")
         sys.stdout.flush()
         k = msvcrt.getch()
         if k in (b"q", b"\x1b"):
             break
+        if k in (b"z", b" ", b"\r", b"\n"):            # A / talk / confirm
+            if dlg is not None:
+                dpg += 1
+                if dpg >= len(dlg):
+                    dlg, dpg = None, 0
+            else:
+                fdx, fdy = DELTA[facing]
+                fcell = (ax + fdx, ay + fdy)
+                npc = next((n for n in w.m.npcs if not n.get("hidden") and
+                            (n.get("cx", n["x"]), n.get("cy", n["y"])) == fcell), None)
+                if npc is not None:
+                    pages = npc_text_pages(w.m.base, npc.get("text"))
+                    dlg, dpg = (pages if pages else [["...", ""]]), 0
+            continue
+        if dlg is not None:                            # dialogue eats movement keys
+            continue
         if k in (b"\xe0", b"\x00"):
             action = arrows.get(msvcrt.getch())
         else:
