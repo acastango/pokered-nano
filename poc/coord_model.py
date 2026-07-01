@@ -618,26 +618,30 @@ def cmd_play(argv):
         def anim_step(o_ax, o_ay, n_ax, n_ay):          # FINE LAYER: walk-cycle tween
             opx, opy = w.m.player_px(o_ax, o_ay)        # between two coordinate updates,
             npx, npy = w.m.player_px(n_ax, n_ay)        # slide 16px + cycle the walk frame
-            N = 8
+            N = 4 if not braille else 8                 # fewer frames in heavy block mode
             for f in range(1, N + 1):
                 t = f / N
                 px = int(opx + (npx - opx) * t)
                 py = int(opy + (npy - opy) * t)
                 cx = clamp(px - CENTER, 0, w.m.PTWpx - VW_PX)
                 cy = clamp(py - CENTER, 0, w.m.PTHpx - VH_PX)
-                wf = 1 if f < N else 0                   # step frame mid-slide, stand at rest
+                wf = 1 if f * 2 <= N else 0              # step in first half, plant in second
                 fb = compose(w.m.world_fb, cx, cy,
                              [(spr[facing][wf], px - cx, py - cy)], invert=True)
-                print("\033[2J\033[H  🧠 the neural net is driving   %s\n\n%s"
-                      % (mc, (to_braille if braille else to_block)(fb)))
+                sys.stdout.write(
+                    "\033[H  🧠 the neural net is driving   %s  (%d,%d)  %-16s\n"
+                    "  WASD/arrows move,  Z talk,  Q quit       %-24s\n\n%s\033[J"
+                    % (mc, n_ax, n_ay, "", "", (to_braille if braille else to_block)(fb)))
                 sys.stdout.flush()
-                time.sleep(0.018)
+                time.sleep(0.03)                        # let the terminal finish each frame
     w = World(mc); w.spawn_main()
     full = plain_grid(w.m, None, w.m.npcs).split("\n")
     keys = {b"w": "up", b"s": "down", b"a": "left", b"d": "right"}
     arrows = {b"H": "up", b"P": "down", b"K": "left", b"M": "right"}
     note = ""
     dlg, dpg = None, 0                                  # active dialogue pages, page idx
+    skip = False                                        # skip the static redraw after an anim
+    sys.stdout.write("\033[2J")                         # clear once; frames redraw in place
     while True:
         GH, GW = len(full), len(full[0])
         ax, ay = w.cx, w.cy
@@ -664,20 +668,25 @@ def cmd_play(argv):
                         row.append(" ")             # off-map -> blank
                 view.append("".join(row))
             body = "\n".join("    " + "".join(PRETTY.get(c, c) for c in r) for r in view)
-        print("\033[2J\033[H")
-        print("  🧠 the neural net is driving   %s  (%d,%d)  %s"
-              % (mc, ax, ay, "[raw]" if raw else "[+verifier]"))
-        print("  WASD/arrows move,  Z talk,  Q quit       %s\n" % note)
-        print(body)
+        frame = ("  🧠 the neural net is driving   %s  (%d,%d)  %-16s\n"
+                 "  WASD/arrows move,  Z talk,  Q quit       %-24s\n\n%s"
+                 % (mc, ax, ay, "[raw]" if raw else "[+verifier]", note, body))
         if dlg is not None:
             top, bot = (dlg[dpg] + ["", ""])[:2]
             more = "▼ Z" if dpg < len(dlg) - 1 else "(end)"
-            print("\n   ╔" + "═" * 20 + "╗")
-            print("   ║ %-18s ║" % top)
-            print("   ║ %-18s ║  %s" % (bot, more))
-            print("   ╚" + "═" * 20 + "╝")
-        sys.stdout.flush()
-        k = msvcrt.getch()
+            frame += ("\n\n   ╔%s╗\n   ║ %-18s ║\n   ║ %-18s ║  %s\n   ╚%s╝"
+                      % ("═" * 20, top, bot, more, "═" * 20))
+        if not skip:
+            sys.stdout.write("\033[H" + frame + "\033[J")
+            sys.stdout.flush()
+        skip = False
+        k = msvcrt.getch()                             # read a key, then drain repeats
+        if k in (b"\xe0", b"\x00"):
+            k = k + msvcrt.getch()                     # 2-byte arrow
+        while msvcrt.kbhit():                          # discard input backlog (held keys)
+            k = msvcrt.getch()
+            if k in (b"\xe0", b"\x00"):
+                k = k + (msvcrt.getch() if msvcrt.kbhit() else b"")
         if k in (b"q", b"\x1b"):
             break
         if k in (b"z", b" ", b"\r", b"\n"):            # A / talk / confirm
@@ -696,8 +705,8 @@ def cmd_play(argv):
             continue
         if dlg is not None:                            # dialogue eats movement keys
             continue
-        if k in (b"\xe0", b"\x00"):
-            action = arrows.get(msvcrt.getch())
+        if len(k) == 2:                                # arrow (prefix + code)
+            action = arrows.get(k[1:2])
         else:
             action = keys.get(k.lower())
         if not action:
@@ -708,27 +717,35 @@ def cmd_play(argv):
         b = 1                                          # bordered window + map-id
         win = window_at(full, ci, cj, CW, CH, b)
         wx, wy = ax - ci * CW + b, ay - cj * CH + b
-        state = "M%d\n%s\n@%d,%d" % (MAP_IDX[mc], "\n".join(win), wx, wy)
-        pred = batch_next(model, [state], [action], stoi, itos, T)[0]
-        if pred.startswith("M") and ":" in pred:       # model predicts a transition
-            try:
-                didx, dc = pred[1:].split(":")
-                dx, dy = dc.split(",")
-                mc = IDX_LIST[int(didx)]
-                w = World(mc); w.cx, w.cy = int(dx), int(dy)
-                full = plain_grid(w.m, None, w.m.npcs).split("\n")
-                note = "→ %s" % mc
-            except Exception:
-                note = "(bad warp: %s)" % pred
-        else:                                          # plain move within the map
-            c = parse_coord(pred)
-            legal = move_from_grid(wx, wy, action, win)
-            nl = c if (raw and c is not None) else legal
-            if c != legal:
-                note = ("model -> %s" % pred) if raw else "(verifier corrected)"
+        dx, dy = DELTA[action]
+        transition = ((ax + dx, ay + dy) in w.m.warp_at
+                      or not (0 <= ax + dx < GW and 0 <= ay + dy < GH))
+        if not raw and not transition:                 # FAST path: plain move, no model
+            nl = move_from_grid(wx, wy, action, win)   # (verified pos = the rule anyway)
             w.cx, w.cy = ci * CW - b + nl[0], cj * CH - b + nl[1]
+        else:                                          # model: transitions + all of raw
+            state = "M%d\n%s\n@%d,%d" % (MAP_IDX[mc], "\n".join(win), wx, wy)
+            pred = batch_next(model, [state], [action], stoi, itos, T)[0]
+            if pred.startswith("M") and ":" in pred:   # model predicts a transition
+                try:
+                    didx, dc = pred[1:].split(":")
+                    dx2, dy2 = dc.split(",")
+                    mc = IDX_LIST[int(didx)]
+                    w = World(mc); w.cx, w.cy = int(dx2), int(dy2)
+                    full = plain_grid(w.m, None, w.m.npcs).split("\n")
+                    note = "→ %s" % mc
+                except Exception:
+                    note = "(bad warp: %s)" % pred
+            else:                                      # plain move within the map
+                c = parse_coord(pred)
+                legal = move_from_grid(wx, wy, action, win)
+                nl = c if (raw and c is not None) else legal
+                if c != legal:
+                    note = ("model -> %s" % pred) if raw else "(verifier corrected)"
+                w.cx, w.cy = ci * CW - b + nl[0], cj * CH - b + nl[1]
         if gfx and mc == pre_mc and (w.cx, w.cy) != old:
             anim_step(old[0], old[1], w.cx, w.cy)      # animate the coordinate update
+            skip = True                                # anim already left the frame on screen
     print("\033[2J\033[H  bye.")
 
 
