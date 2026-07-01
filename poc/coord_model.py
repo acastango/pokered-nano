@@ -614,6 +614,24 @@ def cmd_play(argv):
         from play import compose, CENTER, clamp
         from play_pallet import to_block, to_braille, VW_PX, VH_PX
         spr = load_sprite("red")
+
+        def anim_step(o_ax, o_ay, n_ax, n_ay):          # FINE LAYER: walk-cycle tween
+            opx, opy = w.m.player_px(o_ax, o_ay)        # between two coordinate updates,
+            npx, npy = w.m.player_px(n_ax, n_ay)        # slide 16px + cycle the walk frame
+            N = 8
+            for f in range(1, N + 1):
+                t = f / N
+                px = int(opx + (npx - opx) * t)
+                py = int(opy + (npy - opy) * t)
+                cx = clamp(px - CENTER, 0, w.m.PTWpx - VW_PX)
+                cy = clamp(py - CENTER, 0, w.m.PTHpx - VH_PX)
+                wf = 1 if f < N else 0                   # step frame mid-slide, stand at rest
+                fb = compose(w.m.world_fb, cx, cy,
+                             [(spr[facing][wf], px - cx, py - cy)], invert=True)
+                print("\033[2J\033[H  🧠 the neural net is driving   %s\n\n%s"
+                      % (mc, (to_braille if braille else to_block)(fb)))
+                sys.stdout.flush()
+                time.sleep(0.018)
     w = World(mc); w.spawn_main()
     full = plain_grid(w.m, None, w.m.npcs).split("\n")
     keys = {b"w": "up", b"s": "down", b"a": "left", b"d": "right"}
@@ -686,6 +704,7 @@ def cmd_play(argv):
             continue
         facing = action
         note = ""
+        old, pre_mc = (ax, ay), mc
         b = 1                                          # bordered window + map-id
         win = window_at(full, ci, cj, CW, CH, b)
         wx, wy = ax - ci * CW + b, ay - cj * CH + b
@@ -708,6 +727,8 @@ def cmd_play(argv):
             if c != legal:
                 note = ("model -> %s" % pred) if raw else "(verifier corrected)"
             w.cx, w.cy = ci * CW - b + nl[0], cj * CH - b + nl[1]
+        if gfx and mc == pre_mc and (w.cx, w.cy) != old:
+            anim_step(old[0], old[1], w.cx, w.cy)      # animate the coordinate update
     print("\033[2J\033[H  bye.")
 
 
